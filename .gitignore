@@ -1,0 +1,13 @@
+.vs/
+x64/
+Debug/
+Release/
+
+*.user
+*.suo
+*.pdb
+*.ilk
+*.obj
+*.idb
+*.tlog
+*.lastbuildstate
