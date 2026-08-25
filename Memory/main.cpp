@@ -1,15 +1,22 @@
-﻿
-#include <windows.h>
+﻿#include <windows.h>
 #include <commdlg.h>
 #include <string>
 #include <sstream>
-
+#include <thread>
+#include <mutex>
 #pragma comment(lib, "Comdlg32.lib")
 
 #define ID_BUTTON_OPEN 1001
 #define ID_STATIC_INFO 1002
 
+
+#define WM_APP_VOL_DONE (WM_APP + 1)
+
 HWND hInfo = nullptr;
+
+
+std::string g_volOutput;
+std::mutex g_volOutputMutex;
 
 std::wstring FormatFileSize(ULONGLONG size)
 {
@@ -44,6 +51,100 @@ std::wstring FormatFileSize(ULONGLONG size)
     return ss.str();
 }
 
+
+std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
+{
+    SECURITY_ATTRIBUTES saAttr{};
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = nullptr;
+
+    HANDLE hReadPipe = nullptr;
+    HANDLE hWritePipe = nullptr;
+
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &saAttr, 0))
+        return "Error: could not create pipe.";
+
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+
+    PROCESS_INFORMATION pi{};
+
+    // CreateProcessW for Buffer
+    std::wstring cmd = commandLine;
+
+    BOOL success = CreateProcessW(
+        nullptr,
+        &cmd[0],
+        nullptr,
+        nullptr,
+        TRUE,              
+        CREATE_NO_WINDOW,   
+        nullptr,
+        nullptr,
+        &si,
+        &pi
+    );
+
+   
+    CloseHandle(hWritePipe);
+
+    if (!success)
+    {
+        CloseHandle(hReadPipe);
+        return "Error: could not start Volatility process. "
+            "Make sure Python and volatility3 are installed and in PATH.";
+    }
+
+    std::string output;
+    char buffer[4096];
+    DWORD bytesRead = 0;
+
+
+    while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, nullptr)
+        && bytesRead > 0)
+    {
+        buffer[bytesRead] = '\0';
+        output.append(buffer, bytesRead);
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    CloseHandle(hReadPipe);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    return output;
+}
+
+
+void RunVolatilityAsync(HWND hwnd, std::wstring dumpPath)
+{
+    std::thread([hwnd, dumpPath]()
+        {
+            std::wstring cmd =
+                L"python -m volatility3 -q -f \"" + dumpPath +
+                L"\" -r json windows.pslist";
+
+            std::string result = RunProcessAndCaptureOutput(cmd);
+
+            {
+                std::lock_guard<std::mutex> lock(g_volOutputMutex);
+                g_volOutput = result;
+            }
+
+            
+            PostMessageW(hwnd, WM_APP_VOL_DONE, 0, 0);
+
+        }).detach();
+}
+
+
 void OpenDumpFile(HWND hwnd)
 {
     wchar_t fileName[MAX_PATH] = {};
@@ -54,9 +155,8 @@ void OpenDumpFile(HWND hwnd)
     ofn.lpstrFile = fileName;
     ofn.nMaxFile = MAX_PATH;
 
-   
     ofn.lpstrFilter =
-        L"Memory Dump (*.dmp)\0*.dmp\0"
+        L"Memory Dump (*.dmp;*.raw;*.mem;*.vmem)\0*.dmp;*.raw;*.mem;*.vmem\0"
         L"All Files (*.*)\0*.*\0";
 
     ofn.nFilterIndex = 1;
@@ -115,7 +215,6 @@ void OpenDumpFile(HWND hwnd)
         : path.substr(pos + 1);
 
     std::wstring info =
-        L"Dump received successfully.\r\n\r\n"
         L"File name:\r\n" +
         name +
         L"\r\n\r\n"
@@ -125,9 +224,34 @@ void OpenDumpFile(HWND hwnd)
         L"Size:\r\n" +
         FormatFileSize(
             static_cast<ULONGLONG>(fileSize.QuadPart)
-        );
+        ) +
+        L"\r\n\r\n"
+        L"Running Volatility3 (windows.pslist)...\r\n"
+        L"This can take a while on large full memory dumps.";
 
     SetWindowTextW(hInfo, info.c_str());
+
+    
+    RunVolatilityAsync(hwnd, path);
+}
+
+// -----------------------------------------------------------------------
+// convert std to UTF8
+// -----------------------------------------------------------------------
+std::wstring Utf8ToWide(const std::string& str)
+{
+    if (str.empty())
+        return std::wstring();
+
+    int sizeNeeded = MultiByteToWideChar(
+        CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
+
+    std::wstring result(sizeNeeded, 0);
+
+    MultiByteToWideChar(
+        CP_UTF8, 0, str.data(), (int)str.size(), &result[0], sizeNeeded);
+
+    return result;
 }
 
 LRESULT CALLBACK WindowProc(
@@ -162,14 +286,16 @@ LRESULT CALLBACK WindowProc(
             TRUE
         );
 
+       
         hInfo = CreateWindowW(
-            L"STATIC",
-            L"Select a .dmp file...",
-            WS_VISIBLE |
-            WS_CHILD |
-            SS_LEFT,
+            L"EDIT",
+            L"Select a memory dump file...",
+            WS_VISIBLE | WS_CHILD | WS_BORDER |
+            WS_VSCROLL | WS_HSCROLL |
+            ES_LEFT | ES_MULTILINE |
+            ES_READONLY | ES_AUTOVSCROLL,
             20, 75,
-            520, 200,
+            720, 480,
             hwnd,
             (HMENU)ID_STATIC_INFO,
             GetModuleHandleW(nullptr),
@@ -191,6 +317,33 @@ LRESULT CALLBACK WindowProc(
         if (LOWORD(wParam) == ID_BUTTON_OPEN)
         {
             OpenDumpFile(hwnd);
+        }
+
+        return 0;
+    }
+
+
+    case WM_APP_VOL_DONE:
+    {
+        std::string resultCopy;
+        {
+            std::lock_guard<std::mutex> lock(g_volOutputMutex);
+            resultCopy = g_volOutput;
+        }
+
+        if (resultCopy.empty())
+        {
+            SetWindowTextW(
+                hInfo,
+                L"Volatility returned no output.\r\n"
+                L"Check that Python and volatility3 are installed "
+                L"and available in PATH."
+            );
+        }
+        else
+        {
+            std::wstring wideResult = Utf8ToWide(resultCopy);
+            SetWindowTextW(hInfo, wideResult.c_str());
         }
 
         return 0;
@@ -251,8 +404,8 @@ int WINAPI wWinMain(
         WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        580,
-        340,
+        780,
+        620,
         nullptr,
         nullptr,
         hInstance,
