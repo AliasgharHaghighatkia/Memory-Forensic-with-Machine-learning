@@ -6,9 +6,9 @@ A Windows-based memory dump analysis project developed in **C++ using the Win32 
 
 This project is being developed as a **Memory Forensics** tool for Windows.
 
-The current version provides a Win32 GUI application that allows the user to select and receive a Windows memory dump (`.dmp`) file and display basic information about the selected dump.
+The current version provides a Win32 GUI application that allows the user to select and receive a Windows memory dump (`.dmp`) file, display basic information about the selected dump, and perform basic memory analysis using **Volatility 3**.
 
-The project is planned to be extended with memory forensic analysis and machine learning capabilities.
+The project is planned to be extended with advanced memory forensic analysis and machine learning capabilities.
 
 ## Current Features
 
@@ -23,6 +23,9 @@ The project is planned to be extended with memory forensic analysis and machine 
   * File size
 * Visual Studio project structure
 * Git/GitHub version control
+* **Volatility 3 integration**
+* **Windows process enumeration using `windows.pslist`**
+* **JSON-formatted Volatility output**
 
 ## Planned Features
 
@@ -34,6 +37,6 @@ The project is planned to be extended with memory forensic analysis and machine 
 * Suspicious memory detection
 * Memory forensic indicators
 * Automated analysis
+* Extended Volatility 3 plugin integration
 * Machine learning-based classification
 * Forensic report generation
-
