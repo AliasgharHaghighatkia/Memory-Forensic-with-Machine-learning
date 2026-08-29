@@ -2,6 +2,9 @@
 
 A Windows-based memory dump analysis project developed in **C++ using the Win32 API**.
 
+<img width="768" height="630" alt="Screenshot 2026-08-29 125436" src="https://github.com/user-attachments/assets/d1a91a98-b70e-4f1b-b531-8e61b55a2a23" />
+
+
 ## Overview
 
 This project is being developed as a **Memory Forensics** tool for Windows.
