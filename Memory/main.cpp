@@ -1,22 +1,81 @@
 ﻿#include <windows.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #include <string>
 #include <sstream>
 #include <thread>
 #include <mutex>
+#include <vector>
+#include "include/json.hpp"
+
 #pragma comment(lib, "Comdlg32.lib")
+#pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "Msimg32.lib")
+
+
+#pragma comment(linker, \
+    "\"/manifestdependency:type='win32' "\
+    "name='Microsoft.Windows.Common-Controls' "\
+    "version='6.0.0.0' "\
+    "processorArchitecture='*' "\
+    "publicKeyToken='6595b64144ccf1df' "\
+    "language='*'\"")
+
+using json = nlohmann::json;
 
 #define ID_BUTTON_OPEN 1001
 #define ID_STATIC_INFO 1002
-
+#define ID_LISTVIEW    1003
+#define ID_STATIC_STATUS 1004
 
 #define WM_APP_VOL_DONE (WM_APP + 1)
 
 HWND hInfo = nullptr;
+HWND hListView = nullptr;
+HWND hStatus = nullptr;
+HWND hHeaderPanel = nullptr;
+HWND hButtonOpen = nullptr;
+
+
+const COLORREF COLOR_ACCENT = RGB(37, 99, 235);  
+const COLORREF COLOR_ACCENT_DARK = RGB(29, 78, 216);
+const COLORREF COLOR_BG = RGB(244, 246, 249); 
+const COLORREF COLOR_PANEL_BG = RGB(255, 255, 255);
+const COLORREF COLOR_TEXT_DARK = RGB(30, 34, 40);
+const COLORREF COLOR_TEXT_MUTED = RGB(110, 118, 130);
+const COLORREF COLOR_STATUS_IDLE = RGB(110, 118, 130);
+const COLORREF COLOR_STATUS_BUSY = RGB(217, 119, 6);
+const COLORREF COLOR_STATUS_OK = RGB(22, 163, 74);
+const COLORREF COLOR_STATUS_ERR = RGB(220, 38, 38);
+const COLORREF COLOR_ROW_ALT = RGB(240, 244, 250);
+
+HFONT hFontTitle = nullptr; 
+HFONT hFontSubtitle = nullptr;
+HFONT hFontUI = nullptr; 
+HFONT hFontMono = nullptr; 
+HBRUSH hBrushBg = nullptr;
+HBRUSH hBrushPanel = nullptr;
+
+std::wstring g_statusText = L"Idle";
+COLORREF g_statusColor = COLOR_STATUS_IDLE;
+bool g_buttonHover = false; 
 
 
 std::string g_volOutput;
 std::mutex g_volOutputMutex;
+
+void SetStatus(const std::wstring& text, COLORREF color)
+{
+    g_statusText = text;
+    g_statusColor = color;
+
+    if (hStatus)
+    {
+        SetWindowTextW(hStatus, text.c_str());
+        InvalidateRect(hStatus, nullptr, TRUE);
+    }
+}
+
 
 std::wstring FormatFileSize(ULONGLONG size)
 {
@@ -51,7 +110,6 @@ std::wstring FormatFileSize(ULONGLONG size)
     return ss.str();
 }
 
-
 std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
 {
     SECURITY_ATTRIBUTES saAttr{};
@@ -75,7 +133,7 @@ std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
 
     PROCESS_INFORMATION pi{};
 
-    // CreateProcessW for Buffer
+   
     std::wstring cmd = commandLine;
 
     BOOL success = CreateProcessW(
@@ -91,7 +149,7 @@ std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
         &pi
     );
 
-   
+    
     CloseHandle(hWritePipe);
 
     if (!success)
@@ -138,7 +196,7 @@ void RunVolatilityAsync(HWND hwnd, std::wstring dumpPath)
                 g_volOutput = result;
             }
 
-            
+           
             PostMessageW(hwnd, WM_APP_VOL_DONE, 0, 0);
 
         }).detach();
@@ -167,6 +225,8 @@ void OpenDumpFile(HWND hwnd)
     if (!GetOpenFileNameW(&ofn))
         return;
 
+    SetStatus(L"● Reading file...", COLOR_STATUS_BUSY);
+
     HANDLE hFile = CreateFileW(
         fileName,
         GENERIC_READ,
@@ -179,6 +239,7 @@ void OpenDumpFile(HWND hwnd)
 
     if (hFile == INVALID_HANDLE_VALUE)
     {
+        SetStatus(L"● Error opening file", COLOR_STATUS_ERR);
         MessageBoxW(
             hwnd,
             L"Could not open the dump file.",
@@ -194,6 +255,7 @@ void OpenDumpFile(HWND hwnd)
     {
         CloseHandle(hFile);
 
+        SetStatus(L"● Error reading file size", COLOR_STATUS_ERR);
         MessageBoxW(
             hwnd,
             L"Could not get the file size.",
@@ -215,28 +277,19 @@ void OpenDumpFile(HWND hwnd)
         : path.substr(pos + 1);
 
     std::wstring info =
-        L"File name:\r\n" +
-        name +
-        L"\r\n\r\n"
-        L"Path:\r\n" +
-        path +
-        L"\r\n\r\n"
-        L"Size:\r\n" +
-        FormatFileSize(
-            static_cast<ULONGLONG>(fileSize.QuadPart)
-        ) +
-        L"\r\n\r\n"
-        L"Running Volatility3 (windows.pslist)...\r\n"
-        L"This can take a while on large full memory dumps.";
+        L"File name:  " + name +
+        L"\r\nPath:  " + path +
+        L"\r\nSize:  " + FormatFileSize(static_cast<ULONGLONG>(fileSize.QuadPart));
 
     SetWindowTextW(hInfo, info.c_str());
+    SetStatus(L"● Running Volatility3 (windows.pslist)...", COLOR_STATUS_BUSY);
 
-    
+   
     RunVolatilityAsync(hwnd, path);
 }
 
 // -----------------------------------------------------------------------
-// convert std to UTF8
+//  std::string (UTF-8/ASCII) To std::wstring 
 // -----------------------------------------------------------------------
 std::wstring Utf8ToWide(const std::string& str)
 {
@@ -254,6 +307,143 @@ std::wstring Utf8ToWide(const std::string& str)
     return result;
 }
 
+// -----------------------------------------------------------------------
+//  windows.pslist for Lastview
+// -----------------------------------------------------------------------
+void SetupPslistColumns(HWND listView)
+{
+    // حذف ستون‌های قبلی (اگر دوباره اجرا شود)
+    while (ListView_DeleteColumn(listView, 0)) {}
+
+    struct ColumnDef { const wchar_t* title; int width; };
+    ColumnDef columns[] = {
+        { L"PID",         60 },
+        { L"PPID",        60 },
+        { L"Process",     200 },
+        { L"Threads",     70 },
+        { L"Handles",     70 },
+        { L"CreateTime",  180 },
+    };
+
+    int index = 0;
+    for (auto& col : columns)
+    {
+        LVCOLUMNW lvc{};
+        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        lvc.pszText = (LPWSTR)col.title;
+        lvc.cx = col.width;
+        lvc.iSubItem = index;
+        ListView_InsertColumn(listView, index, &lvc);
+        index++;
+    }
+}
+
+std::wstring JsonFieldToWString(const json& item, const char* key)
+{
+    if (!item.contains(key) || item.at(key).is_null())
+        return L"-";
+
+    const json& value = item.at(key);
+
+    if (value.is_string())
+    {
+        std::string s = value.get<std::string>();
+        return Utf8ToWide(s);
+    }
+    else
+    {
+        std::string s = value.dump();
+        return Utf8ToWide(s);
+    }
+}
+
+
+bool PopulatePslistFromJson(HWND listView, const std::string& jsonText)
+{
+    json parsed;
+
+    try
+    {
+        parsed = json::parse(jsonText);
+    }
+    catch (const json::parse_error&)
+    {
+        return false;
+    }
+
+    if (!parsed.is_array())
+        return false;
+
+    ListView_DeleteAllItems(listView);
+    SetupPslistColumns(listView);
+
+    int row = 0;
+    for (const auto& item : parsed)
+    {
+        std::wstring pid = JsonFieldToWString(item, "PID");
+        std::wstring ppid = JsonFieldToWString(item, "PPID");
+        std::wstring name = JsonFieldToWString(item, "ImageFileName");
+        std::wstring threads = JsonFieldToWString(item, "Threads");
+        std::wstring handles = JsonFieldToWString(item, "Handles");
+        std::wstring created = JsonFieldToWString(item, "CreateTime");
+
+        LVITEMW lvi{};
+        lvi.mask = LVIF_TEXT;
+        lvi.iItem = row;
+        lvi.iSubItem = 0;
+        lvi.pszText = (LPWSTR)pid.c_str();
+        int insertedIndex = ListView_InsertItem(listView, &lvi);
+
+        ListView_SetItemText(listView, insertedIndex, 1, (LPWSTR)ppid.c_str());
+        ListView_SetItemText(listView, insertedIndex, 2, (LPWSTR)name.c_str());
+        ListView_SetItemText(listView, insertedIndex, 3, (LPWSTR)threads.c_str());
+        ListView_SetItemText(listView, insertedIndex, 4, (LPWSTR)handles.c_str());
+        ListView_SetItemText(listView, insertedIndex, 5, (LPWSTR)created.c_str());
+
+        row++;
+    }
+
+    return true;
+}
+
+// -----------------------------------------------------------------------
+// Subclass
+// -----------------------------------------------------------------------
+LRESULT CALLBACK ButtonSubclassProc(
+    HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+{
+    switch (uMsg)
+    {
+    case WM_MOUSEMOVE:
+    {
+        if (!g_buttonHover)
+        {
+            g_buttonHover = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            TrackMouseEvent(&tme);
+        }
+        break;
+    }
+    case WM_MOUSELEAVE:
+    {
+        g_buttonHover = false;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        break;
+    }
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, ButtonSubclassProc, uIdSubclass);
+        break;
+    }
+
+    return DefSubclassProc(hwnd, uMsg, wParam, lParam);
+}
+
 LRESULT CALLBACK WindowProc(
     HWND hwnd,
     UINT uMsg,
@@ -264,52 +454,336 @@ LRESULT CALLBACK WindowProc(
     {
     case WM_CREATE:
     {
-        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        hFontTitle = CreateFontW(
+            -22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+        hFontSubtitle = CreateFontW(
+            -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+        hFontUI = CreateFontW(
+            -15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+        hFontMono = CreateFontW(
+            -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH, L"Consolas");
+
+        hBrushBg = CreateSolidBrush(COLOR_BG);
+        hBrushPanel = CreateSolidBrush(COLOR_PANEL_BG);
+
+        hHeaderPanel = CreateWindowW(
+            L"STATIC", L"",
+            WS_VISIBLE | WS_CHILD | SS_OWNERDRAW,
+            0, 0, 780, 72,
+            hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+        );
 
         HWND hButton = CreateWindowW(
             L"BUTTON",
-            L"Open Memory Dump",
+            L"📂  Open Memory Dump",
             WS_TABSTOP | WS_VISIBLE |
-            WS_CHILD | BS_DEFPUSHBUTTON,
-            20, 20,
-            180, 35,
+            WS_CHILD | BS_OWNERDRAW,
+            24, 90,
+            210, 38,
             hwnd,
             (HMENU)ID_BUTTON_OPEN,
             GetModuleHandleW(nullptr),
             nullptr
         );
+        SendMessageW(hButton, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+        hButtonOpen = hButton;
+        SetWindowSubclass(hButtonOpen, ButtonSubclassProc, 1, 0);
 
-        SendMessageW(
-            hButton,
-            WM_SETFONT,
-            (WPARAM)hFont,
-            TRUE
+        hStatus = CreateWindowW(
+            L"STATIC", L"● Idle",
+            WS_VISIBLE | WS_CHILD | SS_OWNERDRAW,
+            250, 90, 500, 38,
+            hwnd, (HMENU)ID_STATIC_STATUS, GetModuleHandleW(nullptr), nullptr
         );
 
-       
+        HWND hGroupFile = CreateWindowW(
+            L"BUTTON", L"File Information",
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
+            24, 142, 732, 90,
+            hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+        );
+        SendMessageW(hGroupFile, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
         hInfo = CreateWindowW(
             L"EDIT",
-            L"Select a memory dump file...",
+            L"Select a memory dump file to begin...",
             WS_VISIBLE | WS_CHILD | WS_BORDER |
             WS_VSCROLL | WS_HSCROLL |
             ES_LEFT | ES_MULTILINE |
             ES_READONLY | ES_AUTOVSCROLL,
-            20, 75,
-            720, 480,
+            36, 166,
+            708, 56,
             hwnd,
             (HMENU)ID_STATIC_INFO,
             GetModuleHandleW(nullptr),
             nullptr
         );
+        SendMessageW(hInfo, WM_SETFONT, (WPARAM)hFontMono, TRUE);
 
-        SendMessageW(
-            hInfo,
-            WM_SETFONT,
-            (WPARAM)hFont,
-            TRUE
+       
+        HWND hGroupList = CreateWindowW(
+            L"BUTTON", L"Process List  (windows.pslist)",
+            WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
+            24, 246, 732, 344,
+            hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+        );
+        SendMessageW(hGroupList, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+      
+        hListView = CreateWindowW(
+            WC_LISTVIEWW,
+            L"",
+            WS_VISIBLE | WS_CHILD | WS_BORDER |
+            LVS_REPORT | LVS_SHOWSELALWAYS,
+            36, 270,
+            708, 306,
+            hwnd,
+            (HMENU)ID_LISTVIEW,
+            GetModuleHandleW(nullptr),
+            nullptr
         );
 
+        ListView_SetExtendedListViewStyle(
+            hListView,
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER
+        );
+
+        SendMessageW(hListView, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+        SetupPslistColumns(hListView);
+
+        RECT rcInfo, rcList;
+        GetWindowRect(hInfo, &rcInfo);
+        GetWindowRect(hListView, &rcList);
+
+        HRGN hRgnInfo = CreateRoundRectRgn(
+            0, 0, rcInfo.right - rcInfo.left, rcInfo.bottom - rcInfo.top, 8, 8);
+        SetWindowRgn(hInfo, hRgnInfo, TRUE);
+
+        HRGN hRgnList = CreateRoundRectRgn(
+            0, 0, rcList.right - rcList.left, rcList.bottom - rcList.top, 8, 8);
+        SetWindowRgn(hListView, hRgnList, TRUE);
+
         return 0;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC hdcStatic = (HDC)wParam;
+        HWND hCtrl = (HWND)lParam;
+
+        SetBkMode(hdcStatic, TRANSPARENT);
+
+        if (hCtrl == hInfo)
+        {
+            SetTextColor(hdcStatic, COLOR_TEXT_DARK);
+            SetBkColor(hdcStatic, COLOR_PANEL_BG);
+            return (LRESULT)hBrushPanel;
+        }
+
+        SetTextColor(hdcStatic, COLOR_TEXT_DARK);
+        return (LRESULT)hBrushBg;
+    }
+
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hdcEdit = (HDC)wParam;
+        SetTextColor(hdcEdit, COLOR_TEXT_DARK);
+        SetBkColor(hdcEdit, COLOR_PANEL_BG);
+        return (LRESULT)hBrushPanel;
+    }
+
+    case WM_ERASEBKGND:
+    {
+        HDC hdc = (HDC)wParam;
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(hdc, &rc, hBrushBg);
+        return 1;
+    }
+
+    case WM_DRAWITEM:
+    {
+        LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
+
+        if (dis->hwndItem == hButtonOpen)
+        {
+            bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+
+            COLORREF top, bottom;
+            if (pressed)
+            {
+                top = COLOR_ACCENT_DARK;
+                bottom = RGB(14, 40, 105);
+            }
+            else if (g_buttonHover)
+            {
+                top = RGB(65, 130, 255);
+                bottom = COLOR_ACCENT;
+            }
+            else
+            {
+                top = COLOR_ACCENT;
+                bottom = COLOR_ACCENT_DARK;
+            }
+
+            // گرادینت عمودی روی دکمه
+            TRIVERTEX vert[2];
+            vert[0].x = dis->rcItem.left;
+            vert[0].y = dis->rcItem.top;
+            vert[0].Red = GetRValue(top) << 8;
+            vert[0].Green = GetGValue(top) << 8;
+            vert[0].Blue = GetBValue(top) << 8;
+            vert[0].Alpha = 0;
+
+            vert[1].x = dis->rcItem.right;
+            vert[1].y = dis->rcItem.bottom;
+            vert[1].Red = GetRValue(bottom) << 8;
+            vert[1].Green = GetGValue(bottom) << 8;
+            vert[1].Blue = GetBValue(bottom) << 8;
+            vert[1].Alpha = 0;
+
+            GRADIENT_RECT gRect = { 0, 1 };
+
+            HRGN hRoundRgn = CreateRoundRectRgn(
+                dis->rcItem.left, dis->rcItem.top,
+                dis->rcItem.right + 1, dis->rcItem.bottom + 1,
+                10, 10);
+            HRGN hOldClip = CreateRectRgn(0, 0, 0, 0);
+            GetClipRgn(dis->hDC, hOldClip);
+            SelectClipRgn(dis->hDC, hRoundRgn);
+
+            GradientFill(dis->hDC, vert, 2, &gRect, 1, GRADIENT_FILL_RECT_V);
+
+            SelectClipRgn(dis->hDC, hOldClip);
+            DeleteObject(hOldClip);
+            DeleteObject(hRoundRgn);
+
+         
+            COLORREF borderColor = g_buttonHover ? RGB(150, 190, 255) : RGB(0, 0, 0);
+            HPEN hPen = CreatePen(PS_SOLID, g_buttonHover ? 2 : 1, borderColor);
+            HPEN hOldPen = (HPEN)SelectObject(dis->hDC, hPen);
+            HBRUSH hOldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+            RoundRect(dis->hDC, dis->rcItem.left, dis->rcItem.top,
+                dis->rcItem.right, dis->rcItem.bottom, 10, 10);
+            SelectObject(dis->hDC, hOldPen);
+            SelectObject(dis->hDC, hOldBrush);
+            DeleteObject(hPen);
+
+            wchar_t text[128];
+            GetWindowTextW(dis->hwndItem, text, 128);
+
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, RGB(255, 255, 255));
+            SelectObject(dis->hDC, hFontUI);
+            RECT rcText = dis->rcItem;
+            if (pressed) OffsetRect(&rcText, 0, 1);
+            DrawTextW(dis->hDC, text, -1, &rcText,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            return TRUE;
+        }
+
+        if (dis->hwndItem == hHeaderPanel)
+        {
+            TRIVERTEX vert[2];
+            vert[0].x = dis->rcItem.left;
+            vert[0].y = dis->rcItem.top;
+            vert[0].Red = GetRValue(COLOR_ACCENT) << 8;
+            vert[0].Green = GetGValue(COLOR_ACCENT) << 8;
+            vert[0].Blue = GetBValue(COLOR_ACCENT) << 8;
+            vert[0].Alpha = 0;
+
+            vert[1].x = dis->rcItem.right;
+            vert[1].y = dis->rcItem.bottom;
+            vert[1].Red = GetRValue(COLOR_ACCENT_DARK) << 8;
+            vert[1].Green = GetGValue(COLOR_ACCENT_DARK) << 8;
+            vert[1].Blue = GetBValue(COLOR_ACCENT_DARK) << 8;
+            vert[1].Alpha = 0;
+
+            GRADIENT_RECT gRect = { 0, 1 };
+            GradientFill(dis->hDC, vert, 2, &gRect, 1, GRADIENT_FILL_RECT_H);
+
+            RECT rcAccentLine = dis->rcItem;
+            rcAccentLine.top = rcAccentLine.bottom - 3;
+            HBRUSH hAccentLine = CreateSolidBrush(COLOR_ACCENT);
+            FillRect(dis->hDC, &rcAccentLine, hAccentLine);
+            DeleteObject(hAccentLine);
+
+            SetBkMode(dis->hDC, TRANSPARENT);
+
+            RECT rcTitle = dis->rcItem;
+            rcTitle.left += 24;
+            rcTitle.top += 12;
+            SetTextColor(dis->hDC, RGB(255, 255, 255));
+            SelectObject(dis->hDC, hFontTitle);
+            DrawTextW(dis->hDC, L"🧠 Memory Dump Analyzer", -1, &rcTitle,
+                DT_LEFT | DT_TOP | DT_SINGLELINE);
+
+            RECT rcSub = dis->rcItem;
+            rcSub.left += 26;
+            rcSub.top += 42;
+            SetTextColor(dis->hDC, RGB(219, 234, 254));
+            SelectObject(dis->hDC, hFontSubtitle);
+            DrawTextW(dis->hDC, L"Volatility3 forensic triage · ML-ready output",
+                -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE);
+
+            return TRUE;
+        }
+
+        if (dis->hwndItem == hStatus)
+        {
+            FillRect(dis->hDC, &dis->rcItem, hBrushBg);
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, g_statusColor);
+            SelectObject(dis->hDC, hFontUI);
+
+            RECT rc = dis->rcItem;
+            DrawTextW(dis->hDC, g_statusText.c_str(), -1, &rc,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            return TRUE;
+        }
+
+        return FALSE;
+    }
+
+    case WM_NOTIFY:
+    {
+        LPNMHDR nmhdr = (LPNMHDR)lParam;
+
+        if (nmhdr->hwndFrom == hListView && nmhdr->code == NM_CUSTOMDRAW)
+        {
+            LPNMLVCUSTOMDRAW lvcd = (LPNMLVCUSTOMDRAW)lParam;
+
+            switch (lvcd->nmcd.dwDrawStage)
+            {
+            case CDDS_PREPAINT:
+                SetWindowLongPtr(hwnd, DWLP_MSGRESULT, CDRF_NOTIFYITEMDRAW);
+                return TRUE;
+
+            case CDDS_ITEMPREPAINT:
+            {
+                int row = (int)lvcd->nmcd.dwItemSpec;
+                lvcd->clrTextBk = (row % 2 == 0) ? COLOR_PANEL_BG : COLOR_ROW_ALT;
+                lvcd->clrText = COLOR_TEXT_DARK;
+                SetWindowLongPtr(hwnd, DWLP_MSGRESULT, CDRF_DODEFAULT);
+                return TRUE;
+            }
+            }
+        }
+
+        break;
     }
 
     case WM_COMMAND:
@@ -322,7 +796,7 @@ LRESULT CALLBACK WindowProc(
         return 0;
     }
 
-
+    
     case WM_APP_VOL_DONE:
     {
         std::string resultCopy;
@@ -339,17 +813,42 @@ LRESULT CALLBACK WindowProc(
                 L"Check that Python and volatility3 are installed "
                 L"and available in PATH."
             );
+            SetStatus(L"● No output from Volatility", COLOR_STATUS_ERR);
+            ListView_DeleteAllItems(hListView);
         }
         else
         {
-            std::wstring wideResult = Utf8ToWide(resultCopy);
-            SetWindowTextW(hInfo, wideResult.c_str());
+            // ابتدا سعی می‌کنیم JSON را پارس کرده و در ListView نشان دهیم
+            bool parsedOk = PopulatePslistFromJson(hListView, resultCopy);
+
+            if (parsedOk)
+            {
+                int rowCount = ListView_GetItemCount(hListView);
+                std::wstringstream ss;
+                ss << L"Loaded successfully — " << rowCount << L" processes found.";
+                SetWindowTextW(hInfo, ss.str().c_str());
+                SetStatus(L"● Done", COLOR_STATUS_OK);
+            }
+            else
+            {
+               
+                std::wstring wideResult = Utf8ToWide(resultCopy);
+                SetWindowTextW(hInfo, wideResult.c_str());
+                SetStatus(L"● Volatility error — see details above", COLOR_STATUS_ERR);
+                ListView_DeleteAllItems(hListView);
+            }
         }
 
         return 0;
     }
 
     case WM_DESTROY:
+        if (hFontTitle) DeleteObject(hFontTitle);
+        if (hFontSubtitle) DeleteObject(hFontSubtitle);
+        if (hFontUI) DeleteObject(hFontUI);
+        if (hFontMono) DeleteObject(hFontMono);
+        if (hBrushBg) DeleteObject(hBrushBg);
+        if (hBrushPanel) DeleteObject(hBrushPanel);
         PostQuitMessage(0);
         return 0;
     }
@@ -368,6 +867,11 @@ int WINAPI wWinMain(
     PWSTR,
     int nCmdShow)
 {
+    INITCOMMONCONTROLSEX icex{};
+    icex.dwSize = sizeof(icex);
+    icex.dwICC = ICC_LISTVIEW_CLASSES;
+    InitCommonControlsEx(&icex);
+
     const wchar_t CLASS_NAME[] =
         L"DumpReceiverWindowClass";
 
@@ -405,7 +909,7 @@ int WINAPI wWinMain(
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         780,
-        620,
+        640,
         nullptr,
         nullptr,
         hInstance,
