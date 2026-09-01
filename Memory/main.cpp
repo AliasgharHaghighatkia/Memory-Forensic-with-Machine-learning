@@ -26,14 +26,37 @@ using json = nlohmann::json;
 #define ID_STATIC_INFO 1002
 #define ID_LISTVIEW    1003
 #define ID_STATIC_STATUS 1004
+#define ID_COMBO_PLUGIN  1005
 
 #define WM_APP_VOL_DONE (WM_APP + 1)
+
+struct PluginOption
+{
+    const wchar_t* label;
+    const wchar_t* plugin;
+};
+
+const PluginOption PLUGIN_OPTIONS[] = {
+    { L"Process List (pslist)",        L"windows.pslist"   },
+    { L"Process Tree (pstree)",        L"windows.pstree"   },
+    { L"Loaded DLLs (dlllist)",        L"windows.dlllist"  },
+    { L"Suspicious Memory (malfind)",  L"windows.malfind"  },
+    { L"Network Connections (netscan)",L"windows.netscan"  },
+    { L"Handles (handles)",            L"windows.handles"  },
+    { L"Services (svcscan)",           L"windows.svcscan"  },
+    { L"System Info (info)",           L"windows.info"     },
+};
+const int PLUGIN_OPTIONS_COUNT = sizeof(PLUGIN_OPTIONS) / sizeof(PLUGIN_OPTIONS[0]);
 
 HWND hInfo = nullptr;
 HWND hListView = nullptr;
 HWND hStatus = nullptr;
 HWND hHeaderPanel = nullptr;
 HWND hButtonOpen = nullptr;
+HWND hComboPlugin = nullptr;
+HWND hGroupList = nullptr;
+
+std::wstring g_dumpPath;
 
 const COLORREF COLOR_ACCENT = RGB(37, 99, 235);
 const COLORREF COLOR_ACCENT_DARK = RGB(29, 78, 216);
@@ -187,13 +210,13 @@ std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
 const std::wstring VOLATILITY_SCRIPT_PATH =
 L"C:\\Users\\Us3r\\volatility3\\vol.py";
 
-void RunVolatilityAsync(HWND hwnd, std::wstring dumpPath)
+void RunVolatilityAsync(HWND hwnd, std::wstring dumpPath, std::wstring pluginName)
 {
-    std::thread([hwnd, dumpPath]()
+    std::thread([hwnd, dumpPath, pluginName]()
         {
             std::wstring cmd =
                 L"python3 \"" + VOLATILITY_SCRIPT_PATH + L"\" -q -f \"" +
-                dumpPath + L"\" -r json windows.pslist";
+                dumpPath + L"\" -r json " + pluginName;
 
             std::string result = RunProcessAndCaptureOutput(cmd);
 
@@ -205,6 +228,28 @@ void RunVolatilityAsync(HWND hwnd, std::wstring dumpPath)
             PostMessageW(hwnd, WM_APP_VOL_DONE, 0, 0);
 
         }).detach();
+}
+
+std::wstring GetSelectedPluginArg()
+{
+    int sel = (int)SendMessageW(hComboPlugin, CB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= PLUGIN_OPTIONS_COUNT)
+        sel = 0;
+    return PLUGIN_OPTIONS[sel].plugin;
+}
+
+void RunSelectedPlugin(HWND hwnd)
+{
+    if (g_dumpPath.empty())
+        return;
+
+    std::wstring pluginArg = GetSelectedPluginArg();
+
+    std::wstring status = L"● Running Volatility3 (" + pluginArg + L")...";
+    SetStatus(status.c_str(), COLOR_STATUS_BUSY);
+    ListView_DeleteAllItems(hListView);
+
+    RunVolatilityAsync(hwnd, g_dumpPath, pluginArg);
 }
 
 void OpenDumpFile(HWND hwnd)
@@ -286,9 +331,9 @@ void OpenDumpFile(HWND hwnd)
         L"\r\nSize:  " + FormatFileSize(static_cast<ULONGLONG>(fileSize.QuadPart));
 
     SetWindowTextW(hInfo, info.c_str());
-    SetStatus(L"● Running Volatility3 (windows.pslist)...", COLOR_STATUS_BUSY);
+    g_dumpPath = path;
 
-    RunVolatilityAsync(hwnd, path);
+    RunSelectedPlugin(hwnd);
 }
 
 std::wstring Utf8ToWide(const std::string& str)
@@ -307,35 +352,7 @@ std::wstring Utf8ToWide(const std::string& str)
     return result;
 }
 
-void SetupPslistColumns(HWND listView)
-{
-
-    while (ListView_DeleteColumn(listView, 0)) {}
-
-    struct ColumnDef { const wchar_t* title; int width; };
-    ColumnDef columns[] = {
-        { L"PID",         60 },
-        { L"PPID",        60 },
-        { L"Process",     200 },
-        { L"Threads",     70 },
-        { L"Handles",     70 },
-        { L"CreateTime",  180 },
-    };
-
-    int index = 0;
-    for (auto& col : columns)
-    {
-        LVCOLUMNW lvc{};
-        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        lvc.pszText = (LPWSTR)col.title;
-        lvc.cx = col.width;
-        lvc.iSubItem = index;
-        ListView_InsertColumn(listView, index, &lvc);
-        index++;
-    }
-}
-
-std::wstring JsonFieldToWString(const json& item, const char* key)
+std::wstring JsonFieldToWString(const json& item, const std::string& key)
 {
     if (!item.contains(key) || item.at(key).is_null())
         return L"-";
@@ -349,13 +366,77 @@ std::wstring JsonFieldToWString(const json& item, const char* key)
     }
     else
     {
-
         std::string s = value.dump();
         return Utf8ToWide(s);
     }
 }
 
-bool PopulatePslistFromJson(HWND listView, const std::string& jsonText, int& itemCount)
+std::vector<std::string> CollectColumnKeys(const json& parsedArray)
+{
+    std::vector<std::string> keys;
+
+    static const std::vector<std::string> IGNORED_KEYS = {
+        "__children"
+    };
+
+    for (const auto& item : parsedArray)
+    {
+        if (!item.is_object())
+            continue;
+
+        for (auto it = item.begin(); it != item.end(); ++it)
+        {
+            const std::string& key = it.key();
+
+            bool ignored = false;
+            for (auto& ig : IGNORED_KEYS)
+            {
+                if (key == ig) { ignored = true; break; }
+            }
+            if (ignored)
+                continue;
+
+            bool alreadyAdded = false;
+            for (auto& k : keys)
+            {
+                if (k == key) { alreadyAdded = true; break; }
+            }
+            if (!alreadyAdded)
+                keys.push_back(key);
+        }
+    }
+
+    return keys;
+}
+
+void SetupDynamicColumns(HWND listView, const std::vector<std::string>& keys)
+{
+    while (ListView_DeleteColumn(listView, 0)) {}
+
+    int index = 0;
+    for (const auto& key : keys)
+    {
+        std::wstring wideKey = Utf8ToWide(key);
+
+        int width = 120;
+        if (key == "PID" || key == "PPID" || key == "Threads" || key == "Handles")
+            width = 70;
+        else if (key == "ImageFileName" || key == "Process" || key == "Name")
+            width = 200;
+        else if (key == "Hexdump" || key == "Disasm")
+            width = 300;
+
+        LVCOLUMNW lvc{};
+        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        lvc.pszText = (LPWSTR)wideKey.c_str();
+        lvc.cx = width;
+        lvc.iSubItem = index;
+        ListView_InsertColumn(listView, index, &lvc);
+        index++;
+    }
+}
+
+bool PopulateListViewFromJson(HWND listView, const std::string& jsonText, int& itemCount)
 {
     itemCount = 0;
     json parsed;
@@ -366,15 +447,16 @@ bool PopulatePslistFromJson(HWND listView, const std::string& jsonText, int& ite
     }
     catch (const std::exception&)
     {
-
         return false;
     }
 
     if (!parsed.is_array())
         return false;
 
+    std::vector<std::string> keys = CollectColumnKeys(parsed);
+
     ListView_DeleteAllItems(listView);
-    SetupPslistColumns(listView);
+    SetupDynamicColumns(listView, keys);
 
     int row = 0;
     for (const auto& item : parsed)
@@ -382,25 +464,20 @@ bool PopulatePslistFromJson(HWND listView, const std::string& jsonText, int& ite
         if (!item.is_object())
             continue;
 
-        std::wstring pid = JsonFieldToWString(item, "PID");
-        std::wstring ppid = JsonFieldToWString(item, "PPID");
-        std::wstring name = JsonFieldToWString(item, "ImageFileName");
-        std::wstring threads = JsonFieldToWString(item, "Threads");
-        std::wstring handles = JsonFieldToWString(item, "Handles");
-        std::wstring created = JsonFieldToWString(item, "CreateTime");
-
         LVITEMW lvi{};
         lvi.mask = LVIF_TEXT;
         lvi.iItem = row;
         lvi.iSubItem = 0;
-        lvi.pszText = (LPWSTR)pid.c_str();
+
+        std::wstring firstValue = keys.empty() ? L"" : JsonFieldToWString(item, keys[0]);
+        lvi.pszText = (LPWSTR)firstValue.c_str();
         int insertedIndex = ListView_InsertItem(listView, &lvi);
 
-        ListView_SetItemText(listView, insertedIndex, 1, (LPWSTR)ppid.c_str());
-        ListView_SetItemText(listView, insertedIndex, 2, (LPWSTR)name.c_str());
-        ListView_SetItemText(listView, insertedIndex, 3, (LPWSTR)threads.c_str());
-        ListView_SetItemText(listView, insertedIndex, 4, (LPWSTR)handles.c_str());
-        ListView_SetItemText(listView, insertedIndex, 5, (LPWSTR)created.c_str());
+        for (size_t col = 1; col < keys.size(); col++)
+        {
+            std::wstring value = JsonFieldToWString(item, keys[col]);
+            ListView_SetItemText(listView, insertedIndex, (int)col, (LPWSTR)value.c_str());
+        }
 
         row++;
     }
@@ -501,10 +578,30 @@ LRESULT CALLBACK WindowProc(
         hButtonOpen = hButton;
         SetWindowSubclass(hButtonOpen, ButtonSubclassProc, 1, 0);
 
+        hComboPlugin = CreateWindowW(
+            L"COMBOBOX",
+            L"",
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP |
+            CBS_DROPDOWNLIST | WS_VSCROLL,
+            250, 90,
+            280, 200,
+            hwnd,
+            (HMENU)ID_COMBO_PLUGIN,
+            GetModuleHandleW(nullptr),
+            nullptr
+        );
+        SendMessageW(hComboPlugin, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+
+        for (int i = 0; i < PLUGIN_OPTIONS_COUNT; i++)
+        {
+            SendMessageW(hComboPlugin, CB_ADDSTRING, 0, (LPARAM)PLUGIN_OPTIONS[i].label);
+        }
+        SendMessageW(hComboPlugin, CB_SETCURSEL, 0, 0);
+
         hStatus = CreateWindowW(
             L"STATIC", L"● Idle",
             WS_VISIBLE | WS_CHILD | SS_OWNERDRAW,
-            250, 90, 500, 38,
+            542, 90, 210, 38,
             hwnd, (HMENU)ID_STATIC_STATUS, GetModuleHandleW(nullptr), nullptr
         );
 
@@ -533,12 +630,13 @@ LRESULT CALLBACK WindowProc(
         SendMessageW(hInfo, WM_SETFONT, (WPARAM)hFontMono, TRUE);
 
         HWND hGroupList = CreateWindowW(
-            L"BUTTON", L"Process List  (windows.pslist)",
+            L"BUTTON", L"Results",
             WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
             24, 246, 732, 344,
             hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
         );
         SendMessageW(hGroupList, WM_SETFONT, (WPARAM)hFontUI, TRUE);
+        ::hGroupList = hGroupList;
 
         hListView = CreateWindowW(
             WC_LISTVIEWW,
@@ -559,7 +657,6 @@ LRESULT CALLBACK WindowProc(
         );
 
         SendMessageW(hListView, WM_SETFONT, (WPARAM)hFontUI, TRUE);
-        SetupPslistColumns(hListView);
 
         RECT rcInfo, rcList;
         GetWindowRect(hInfo, &rcInfo);
@@ -790,6 +887,10 @@ LRESULT CALLBACK WindowProc(
         {
             OpenDumpFile(hwnd);
         }
+        else if (LOWORD(wParam) == ID_COMBO_PLUGIN && HIWORD(wParam) == CBN_SELCHANGE)
+        {
+            RunSelectedPlugin(hwnd);
+        }
 
         return 0;
     }
@@ -829,14 +930,17 @@ LRESULT CALLBACK WindowProc(
         }
         else
         {
+            std::wstring pluginArg = GetSelectedPluginArg();
+            std::wstring groupTitle = L"Results  (" + pluginArg + L")";
+            SetWindowTextW(hGroupList, groupTitle.c_str());
 
             int itemCount = 0;
-            bool parsedOk = PopulatePslistFromJson(hListView, resultCopy, itemCount);
+            bool parsedOk = PopulateListViewFromJson(hListView, resultCopy, itemCount);
 
             if (parsedOk && itemCount > 0)
             {
                 std::wstringstream ss;
-                ss << L"Loaded successfully — " << itemCount << L" processes found.";
+                ss << L"Loaded successfully — " << itemCount << L" items found.";
                 SetWindowTextW(hInfo, ss.str().c_str());
                 SetStatus(L"● Done", COLOR_STATUS_OK);
             }
