@@ -12,7 +12,6 @@
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "Msimg32.lib")
 
-
 #pragma comment(linker, \
     "\"/manifestdependency:type='win32' "\
     "name='Microsoft.Windows.Common-Controls' "\
@@ -36,10 +35,9 @@ HWND hStatus = nullptr;
 HWND hHeaderPanel = nullptr;
 HWND hButtonOpen = nullptr;
 
-
-const COLORREF COLOR_ACCENT = RGB(37, 99, 235);  
+const COLORREF COLOR_ACCENT = RGB(37, 99, 235);
 const COLORREF COLOR_ACCENT_DARK = RGB(29, 78, 216);
-const COLORREF COLOR_BG = RGB(244, 246, 249); 
+const COLORREF COLOR_BG = RGB(244, 246, 249);
 const COLORREF COLOR_PANEL_BG = RGB(255, 255, 255);
 const COLORREF COLOR_TEXT_DARK = RGB(30, 34, 40);
 const COLORREF COLOR_TEXT_MUTED = RGB(110, 118, 130);
@@ -49,17 +47,16 @@ const COLORREF COLOR_STATUS_OK = RGB(22, 163, 74);
 const COLORREF COLOR_STATUS_ERR = RGB(220, 38, 38);
 const COLORREF COLOR_ROW_ALT = RGB(240, 244, 250);
 
-HFONT hFontTitle = nullptr; 
+HFONT hFontTitle = nullptr;
 HFONT hFontSubtitle = nullptr;
-HFONT hFontUI = nullptr; 
-HFONT hFontMono = nullptr; 
+HFONT hFontUI = nullptr;
+HFONT hFontMono = nullptr;
 HBRUSH hBrushBg = nullptr;
 HBRUSH hBrushPanel = nullptr;
 
 std::wstring g_statusText = L"Idle";
 COLORREF g_statusColor = COLOR_STATUS_IDLE;
-bool g_buttonHover = false; 
-
+bool g_buttonHover = false;
 
 std::string g_volOutput;
 std::mutex g_volOutputMutex;
@@ -75,7 +72,6 @@ void SetStatus(const std::wstring& text, COLORREF color)
         InvalidateRect(hStatus, nullptr, TRUE);
     }
 }
-
 
 std::wstring FormatFileSize(ULONGLONG size)
 {
@@ -125,15 +121,23 @@ std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
 
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
 
+    SECURITY_ATTRIBUTES saNull{};
+    saNull.nLength = sizeof(saNull);
+    saNull.bInheritHandle = TRUE;
+    saNull.lpSecurityDescriptor = nullptr;
+
+    HANDLE hNul = CreateFileW(
+        L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE,
+        &saNull, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags |= STARTF_USESTDHANDLES;
     si.hStdOutput = hWritePipe;
-    si.hStdError = hWritePipe;
+    si.hStdError = (hNul != INVALID_HANDLE_VALUE) ? hNul : hWritePipe;
 
     PROCESS_INFORMATION pi{};
 
-   
     std::wstring cmd = commandLine;
 
     BOOL success = CreateProcessW(
@@ -141,16 +145,17 @@ std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
         &cmd[0],
         nullptr,
         nullptr,
-        TRUE,              
-        CREATE_NO_WINDOW,   
+        TRUE,
+        CREATE_NO_WINDOW,
         nullptr,
         nullptr,
         &si,
         &pi
     );
 
-    
     CloseHandle(hWritePipe);
+    if (hNul != INVALID_HANDLE_VALUE)
+        CloseHandle(hNul);
 
     if (!success)
     {
@@ -162,7 +167,6 @@ std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
     std::string output;
     char buffer[4096];
     DWORD bytesRead = 0;
-
 
     while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, nullptr)
         && bytesRead > 0)
@@ -180,14 +184,16 @@ std::string RunProcessAndCaptureOutput(const std::wstring& commandLine)
     return output;
 }
 
+const std::wstring VOLATILITY_SCRIPT_PATH =
+L"C:\\Users\\Us3r\\volatility3\\vol.py";
 
 void RunVolatilityAsync(HWND hwnd, std::wstring dumpPath)
 {
     std::thread([hwnd, dumpPath]()
         {
             std::wstring cmd =
-                L"python -m volatility3 -q -f \"" + dumpPath +
-                L"\" -r json windows.pslist";
+                L"python3 \"" + VOLATILITY_SCRIPT_PATH + L"\" -q -f \"" +
+                dumpPath + L"\" -r json windows.pslist";
 
             std::string result = RunProcessAndCaptureOutput(cmd);
 
@@ -196,12 +202,10 @@ void RunVolatilityAsync(HWND hwnd, std::wstring dumpPath)
                 g_volOutput = result;
             }
 
-           
             PostMessageW(hwnd, WM_APP_VOL_DONE, 0, 0);
 
         }).detach();
 }
-
 
 void OpenDumpFile(HWND hwnd)
 {
@@ -284,13 +288,9 @@ void OpenDumpFile(HWND hwnd)
     SetWindowTextW(hInfo, info.c_str());
     SetStatus(L"● Running Volatility3 (windows.pslist)...", COLOR_STATUS_BUSY);
 
-   
     RunVolatilityAsync(hwnd, path);
 }
 
-// -----------------------------------------------------------------------
-//  std::string (UTF-8/ASCII) To std::wstring 
-// -----------------------------------------------------------------------
 std::wstring Utf8ToWide(const std::string& str)
 {
     if (str.empty())
@@ -307,12 +307,9 @@ std::wstring Utf8ToWide(const std::string& str)
     return result;
 }
 
-// -----------------------------------------------------------------------
-//  windows.pslist for Lastview
-// -----------------------------------------------------------------------
 void SetupPslistColumns(HWND listView)
 {
-    // حذف ستون‌های قبلی (اگر دوباره اجرا شود)
+
     while (ListView_DeleteColumn(listView, 0)) {}
 
     struct ColumnDef { const wchar_t* title; int width; };
@@ -352,22 +349,24 @@ std::wstring JsonFieldToWString(const json& item, const char* key)
     }
     else
     {
+
         std::string s = value.dump();
         return Utf8ToWide(s);
     }
 }
 
-
-bool PopulatePslistFromJson(HWND listView, const std::string& jsonText)
+bool PopulatePslistFromJson(HWND listView, const std::string& jsonText, int& itemCount)
 {
+    itemCount = 0;
     json parsed;
 
     try
     {
         parsed = json::parse(jsonText);
     }
-    catch (const json::parse_error&)
+    catch (const std::exception&)
     {
+
         return false;
     }
 
@@ -380,6 +379,9 @@ bool PopulatePslistFromJson(HWND listView, const std::string& jsonText)
     int row = 0;
     for (const auto& item : parsed)
     {
+        if (!item.is_object())
+            continue;
+
         std::wstring pid = JsonFieldToWString(item, "PID");
         std::wstring ppid = JsonFieldToWString(item, "PPID");
         std::wstring name = JsonFieldToWString(item, "ImageFileName");
@@ -403,12 +405,10 @@ bool PopulatePslistFromJson(HWND listView, const std::string& jsonText)
         row++;
     }
 
+    itemCount = row;
     return true;
 }
 
-// -----------------------------------------------------------------------
-// Subclass
-// -----------------------------------------------------------------------
 LRESULT CALLBACK ButtonSubclassProc(
     HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
     UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
@@ -454,6 +454,7 @@ LRESULT CALLBACK WindowProc(
     {
     case WM_CREATE:
     {
+
         hFontTitle = CreateFontW(
             -22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -531,7 +532,6 @@ LRESULT CALLBACK WindowProc(
         );
         SendMessageW(hInfo, WM_SETFONT, (WPARAM)hFontMono, TRUE);
 
-       
         HWND hGroupList = CreateWindowW(
             L"BUTTON", L"Process List  (windows.pslist)",
             WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
@@ -540,7 +540,6 @@ LRESULT CALLBACK WindowProc(
         );
         SendMessageW(hGroupList, WM_SETFONT, (WPARAM)hFontUI, TRUE);
 
-      
         hListView = CreateWindowW(
             WC_LISTVIEWW,
             L"",
@@ -637,7 +636,6 @@ LRESULT CALLBACK WindowProc(
                 bottom = COLOR_ACCENT_DARK;
             }
 
-            // گرادینت عمودی روی دکمه
             TRIVERTEX vert[2];
             vert[0].x = dis->rcItem.left;
             vert[0].y = dis->rcItem.top;
@@ -669,7 +667,6 @@ LRESULT CALLBACK WindowProc(
             DeleteObject(hOldClip);
             DeleteObject(hRoundRgn);
 
-         
             COLORREF borderColor = g_buttonHover ? RGB(150, 190, 255) : RGB(0, 0, 0);
             HPEN hPen = CreatePen(PS_SOLID, g_buttonHover ? 2 : 1, borderColor);
             HPEN hOldPen = (HPEN)SelectObject(dis->hDC, hPen);
@@ -696,6 +693,7 @@ LRESULT CALLBACK WindowProc(
 
         if (dis->hwndItem == hHeaderPanel)
         {
+
             TRIVERTEX vert[2];
             vert[0].x = dis->rcItem.left;
             vert[0].y = dis->rcItem.top;
@@ -796,13 +794,26 @@ LRESULT CALLBACK WindowProc(
         return 0;
     }
 
-    
     case WM_APP_VOL_DONE:
     {
         std::string resultCopy;
         {
             std::lock_guard<std::mutex> lock(g_volOutputMutex);
             resultCopy = g_volOutput;
+        }
+
+        {
+            wchar_t tempPath[MAX_PATH];
+            GetTempPathW(MAX_PATH, tempPath);
+            std::wstring debugFile = std::wstring(tempPath) + L"volatility_last_output.json";
+            HANDLE hDbg = CreateFileW(debugFile.c_str(), GENERIC_WRITE, 0,
+                nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hDbg != INVALID_HANDLE_VALUE)
+            {
+                DWORD written = 0;
+                WriteFile(hDbg, resultCopy.data(), (DWORD)resultCopy.size(), &written, nullptr);
+                CloseHandle(hDbg);
+            }
         }
 
         if (resultCopy.empty())
@@ -818,20 +829,32 @@ LRESULT CALLBACK WindowProc(
         }
         else
         {
-            // ابتدا سعی می‌کنیم JSON را پارس کرده و در ListView نشان دهیم
-            bool parsedOk = PopulatePslistFromJson(hListView, resultCopy);
 
-            if (parsedOk)
+            int itemCount = 0;
+            bool parsedOk = PopulatePslistFromJson(hListView, resultCopy, itemCount);
+
+            if (parsedOk && itemCount > 0)
             {
-                int rowCount = ListView_GetItemCount(hListView);
                 std::wstringstream ss;
-                ss << L"Loaded successfully — " << rowCount << L" processes found.";
+                ss << L"Loaded successfully — " << itemCount << L" processes found.";
                 SetWindowTextW(hInfo, ss.str().c_str());
                 SetStatus(L"● Done", COLOR_STATUS_OK);
             }
+            else if (parsedOk && itemCount == 0)
+            {
+
+                std::wstring wideResult = Utf8ToWide(resultCopy);
+                std::wstring msg =
+                    L"Parsed OK but 0 processes were found in the JSON array.\r\n"
+                    L"This usually means the dump could not be profiled correctly, "
+                    L"or the wrong plugin/format was used.\r\n\r\n"
+                    L"Raw output:\r\n" + wideResult;
+                SetWindowTextW(hInfo, msg.c_str());
+                SetStatus(L"● Empty result", COLOR_STATUS_ERR);
+            }
             else
             {
-               
+
                 std::wstring wideResult = Utf8ToWide(resultCopy);
                 SetWindowTextW(hInfo, wideResult.c_str());
                 SetStatus(L"● Volatility error — see details above", COLOR_STATUS_ERR);
@@ -867,6 +890,7 @@ int WINAPI wWinMain(
     PWSTR,
     int nCmdShow)
 {
+
     INITCOMMONCONTROLSEX icex{};
     icex.dwSize = sizeof(icex);
     icex.dwICC = ICC_LISTVIEW_CLASSES;
