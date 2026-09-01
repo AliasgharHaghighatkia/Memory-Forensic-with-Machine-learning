@@ -2,7 +2,7 @@
 
 A Windows-based memory dump analysis project developed in **C++ using the Win32 API**.
 
-![Memory Forensic Screenshot](images/Pslsit.png)
+![Memory Forensic Screenshot](images/Pslist.png)
 
 ## Overview
 
