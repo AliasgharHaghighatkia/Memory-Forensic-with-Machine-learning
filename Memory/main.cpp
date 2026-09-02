@@ -37,14 +37,52 @@ struct PluginOption
 };
 
 const PluginOption PLUGIN_OPTIONS[] = {
-    { L"Process List (pslist)",        L"windows.pslist"   },
-    { L"Process Tree (pstree)",        L"windows.pstree"   },
-    { L"Loaded DLLs (dlllist)",        L"windows.dlllist"  },
-    { L"Suspicious Memory (malfind)",  L"windows.malfind"  },
-    { L"Network Connections (netscan)",L"windows.netscan"  },
-    { L"Handles (handles)",            L"windows.handles"  },
-    { L"Services (svcscan)",           L"windows.svcscan"  },
-    { L"System Info (info)",           L"windows.info"     },
+    { L"System Info (info)",              L"windows.info"                  },
+    { L"Process List (pslist)",           L"windows.pslist"                },
+    { L"Process Scan (psscan)",           L"windows.psscan"                },
+    { L"Process Tree (pstree)",           L"windows.pstree"                },
+    { L"Command Lines (cmdline)",         L"windows.cmdline"               },
+    { L"Environment Vars (envars)",       L"windows.envars"                },
+    { L"Sessions (sessions)",             L"windows.sessions"              },
+    { L"Privileges (privileges)",         L"windows.privileges"            },
+    { L"User SIDs (getsids)",             L"windows.getsids"               },
+    { L"Threads (threads)",               L"windows.threads"               },
+    { L"Thread Scan (thrdscan)",          L"windows.thrdscan"              },
+
+    { L"Loaded DLLs (dlllist)",           L"windows.dlllist"               },
+    { L"LDR Modules (ldrmodules)",        L"windows.ldrmodules"            },
+    { L"Suspicious Memory (malfind)",     L"windows.malfind"               },
+    { L"VAD Info (vadinfo)",              L"windows.vadinfo"               },
+    { L"VAD Walk (vadwalk)",              L"windows.vadwalk"               },
+    { L"Virtual Memory Map (virtmap)",    L"windows.virtmap"               },
+    { L"Handles (handles)",               L"windows.handles"               },
+    { L"Kernel Modules (modules)",        L"windows.modules"               },
+    { L"Module Scan (modscan)",           L"windows.modscan"               },
+
+    { L"Network Connections (netscan)",   L"windows.netscan"               },
+    { L"Network Stat (netstat)",          L"windows.netstat"               },
+
+    { L"Services (svcscan)",              L"windows.svcscan"               },
+    { L"Driver Scan (driverscan)",        L"windows.driverscan"            },
+    { L"Device Tree (devicetree)",        L"windows.devicetree"            },
+    { L"Callbacks (callbacks)",           L"windows.callbacks"             },
+    { L"Unloaded Modules (unloadedmodules)", L"windows.unloadedmodules"    },
+
+    { L"File Scan (filescan)",            L"windows.filescan"              },
+    { L"Mutant Scan (mutantscan)",        L"windows.mutantscan"            },
+    { L"Symlink Scan (symlinkscan)",      L"windows.symlinkscan"           },
+    { L"Big Pools (bigpools)",            L"windows.bigpools"              },
+
+    { L"Registry Hives (hivelist)",       L"windows.registry.hivelist"     },
+    { L"Registry Certificates",           L"windows.registry.certificates" },
+    { L"UserAssist (userassist)",         L"windows.registry.userassist"   },
+
+    { L"Shimcache Memory (shimcachemem)", L"windows.shimcachemem"          },
+    { L"Skeleton Key Check",              L"windows.skeleton_key_check"    },
+    { L"Timeliner (timeliner)",           L"windows.timeliner"             },
+    { L"Version Info (verinfo)",          L"windows.verinfo"               },
+    { L"Statistics (statistics)",         L"windows.statistics"            },
+    { L"Crash Info (crashinfo)",          L"windows.crashinfo"             },
 };
 const int PLUGIN_OPTIONS_COUNT = sizeof(PLUGIN_OPTIONS) / sizeof(PLUGIN_OPTIONS[0]);
 
@@ -584,7 +622,7 @@ LRESULT CALLBACK WindowProc(
             WS_VISIBLE | WS_CHILD | WS_TABSTOP |
             CBS_DROPDOWNLIST | WS_VSCROLL,
             250, 90,
-            280, 200,
+            280, 450,
             hwnd,
             (HMENU)ID_COMBO_PLUGIN,
             GetModuleHandleW(nullptr),
